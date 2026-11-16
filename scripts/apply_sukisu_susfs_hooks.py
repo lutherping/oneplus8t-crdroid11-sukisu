@@ -30,23 +30,54 @@ def patch_namei(root: pathlib.Path) -> None:
 
 
 def patch_kernelsu_419(root: pathlib.Path) -> None:
-    p = root / "KernelSU" / "kernel" / "kernel_includes.h"
-    txt = p.read_text(encoding="utf-8", errors="replace")
+    # 1. Guard <linux/static_call.h> (introduced in Linux 5.10)
+    inc = root / "KernelSU" / "kernel" / "kernel_includes.h"
+    txt = inc.read_text(encoding="utf-8", errors="replace")
     target = "#include <linux/static_call.h>\n"
     guarded = (
         "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n"
         "#include <linux/static_call.h>\n"
         "#endif\n"
     )
-    if guarded in txt:
-        print("[=] KernelSU/kernel/kernel_includes.h: static_call.h already guarded")
-        return
-    if target in txt:
-        txt = replace_once(txt, target, guarded, "KernelSU kernel_includes.h static_call guard")
-        p.write_text(txt, encoding="utf-8")
+    if guarded not in txt and target in txt:
+        inc.write_text(
+            replace_once(txt, target, guarded, "KernelSU kernel_includes.h static_call guard"),
+            encoding="utf-8",
+        )
         print("[+] KernelSU/kernel/kernel_includes.h: guarded <linux/static_call.h> for < 5.10")
-    else:
-        print("[=] KernelSU/kernel/kernel_includes.h: static_call.h not present")
+
+    # 2. Fix 2-arg access_ok() in kpm.c for Linux < 5.0 (which requires access_ok(VERIFY_WRITE, addr, size))
+    kpm = root / "KernelSU" / "kernel" / "extension" / "kpm" / "kpm.c"
+    kpm_txt = kpm.read_text(encoding="utf-8", errors="replace")
+    kpm_old = "    if (!access_ok(u64_to_user_ptr(cmd.result_code), sizeof(result))) return -EFAULT;"
+    kpm_new = (
+        "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)\n"
+        "    if (!access_ok(VERIFY_WRITE, u64_to_user_ptr(cmd.result_code), sizeof(result))) return -EFAULT;\n"
+        "#else\n"
+        "    if (!access_ok(u64_to_user_ptr(cmd.result_code), sizeof(result))) return -EFAULT;\n"
+        "#endif"
+    )
+    if "VERIFY_WRITE" not in kpm_txt and kpm_old in kpm_txt:
+        kpm.write_text(replace_once(kpm_txt, kpm_old, kpm_new, "KernelSU kpm.c access_ok 4.19"), encoding="utf-8")
+        print("[+] KernelSU/kernel/extension/kpm/kpm.c: fixed access_ok() for < 5.0")
+
+    # 3. Use ksu_strncpy_from_user_nofault() compat wrapper in sulog/event.c
+    sulog = root / "KernelSU" / "kernel" / "sulog" / "event.c"
+    sulog_txt = sulog.read_text(encoding="utf-8", errors="replace")
+    sulog_old = "            strncpy_from_user_nofault(arg, (const void __user *)untagged_addr((unsigned long)arg_user), sizeof(arg));"
+    sulog_new = "            ksu_strncpy_from_user_nofault(arg, (const void __user *)untagged_addr((unsigned long)arg_user), sizeof(arg));"
+    if sulog_old in sulog_txt:
+        sulog.write_text(replace_once(sulog_txt, sulog_old, sulog_new, "KernelSU sulog/event.c nofault wrapper"), encoding="utf-8")
+        print("[+] KernelSU/kernel/sulog/event.c: switched to ksu_strncpy_from_user_nofault()")
+
+    # 4. Suppress -Wunused-variable for 5.10+-only pol/old_pol in selinux/rules.c
+    rules = root / "KernelSU" / "kernel" / "selinux" / "rules.c"
+    rules_txt = rules.read_text(encoding="utf-8", errors="replace")
+    rules_old = "    struct selinux_policy *pol, *old_pol;\n"
+    rules_new = "    struct selinux_policy __maybe_unused *pol, __maybe_unused *old_pol;\n"
+    if rules_old in rules_txt:
+        rules.write_text(replace_once(rules_txt, rules_old, rules_new, "KernelSU selinux/rules.c unused var"), encoding="utf-8")
+        print("[+] KernelSU/kernel/selinux/rules.c: marked pol/old_pol __maybe_unused")
 
 
 def patch_namespace(root: pathlib.Path) -> None:
