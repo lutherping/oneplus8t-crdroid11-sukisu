@@ -1,0 +1,235 @@
+name: Build OnePlus 8T (kebab) crDroid 11 SukiSU Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_susfs:
+        description: 'Integrate SuSFS v2.4.0 root-hiding patches'
+        required: true
+        type: boolean
+        default: true
+      enable_kpm:
+        description: 'Enable SukiSU KPM (KernelPatch Module) inline patcher'
+        required: true
+        type: boolean
+        default: true
+      localversion:
+        description: 'Kernel CONFIG_LOCALVERSION'
+        required: true
+        type: string
+        default: '-Sirius+'
+
+jobs:
+  build:
+    name: Compile 4.19.325 (kebab / crDroid 15.0)
+    runs-on: ubuntu-24.04
+    env:
+      KERNEL_REPO: https://github.com/crdroidandroid/android_kernel_oneplus_sm8250.git
+      KERNEL_BRANCH: '15.0'
+      SUKISU_REPO: https://github.com/SukiSU-Nova/SukiSU-Nova.git
+      SUKISU_BRANCH: builtin
+      LLVM_URL: https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/LLVM-19.1.7-Linux-X64.tar.xz
+      GCC64_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9.git
+      GCC32_REPO: https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9.git
+      NONGKI_REPO: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git
+      KPM_PATCH_URL: https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/refs/heads/main/kpm/patch_linux
+      AK3_REPO: https://github.com/osm0sis/AnyKernel3.git
+
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex libssl-dev libelf-dev \
+            python3 python-is-python3 cpio p7zip-full zip unzip xz-utils zstd lld rsync
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-kebab-4.19-${{ inputs.enable_susfs }}-${{ inputs.enable_kpm }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-kebab-4.19-${{ inputs.enable_susfs }}-${{ inputs.enable_kpm }}-
+            ccache-kebab-4.19-
+
+      - name: Prepare LLVM 19.1.7 & Android GCC 4.9 binutils
+        run: |
+          mkdir -p "${{ github.workspace }}/clang"
+          curl -sSL "${{ env.LLVM_URL }}" -o llvm.tar.xz
+          tar -xf llvm.tar.xz -C "${{ github.workspace }}/clang" --strip-components=1
+          rm -f llvm.tar.xz
+          git clone "${{ env.GCC64_REPO }}" -b android12L-release --depth=1 "${{ github.workspace }}/gcc64"
+          git clone "${{ env.GCC32_REPO }}" -b android12L-release --depth=1 "${{ github.workspace }}/gcc32"
+
+      - name: Clone crDroid SM8250 kernel & SukiSU-Ultra
+        run: |
+          git clone --recursive "${{ env.KERNEL_REPO }}" -b "${{ env.KERNEL_BRANCH }}" --depth=1 "${{ github.workspace }}/device_kernel"
+          cd "${{ github.workspace }}/device_kernel"
+          echo "KERNEL_HEAD=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+          git clone "${{ env.SUKISU_REPO }}" -b "${{ env.SUKISU_BRANCH }}" --depth=1 "${{ github.workspace }}/device_kernel/KernelSU"
+          cd drivers
+          ln -sf ../KernelSU/kernel kernelsu
+          grep -q 'kernelsu' Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> Makefile
+          grep -q 'drivers/kernelsu/Kconfig' Kconfig || sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' Kconfig
+
+      - name: Apply SuSFS 4.19 patch & SukiSU inline hooks
+        if: ${{ inputs.enable_susfs }}
+        run: |
+          git clone "${{ env.NONGKI_REPO }}" -b mainline --depth=1 "${{ github.workspace }}/nongki_ref"
+          cd "${{ github.workspace }}/device_kernel"
+          cp "${{ github.workspace }}/nongki_ref/Patches/Patch/susfs_patch_to_4.19.patch" ./susfs.patch
+          patch -p1 --no-backup-if-mismatch < susfs.patch || true
+
+          mapfile -t REJS < <(find . -type f -name '*.rej' | sort)
+          if [ "${#REJS[@]}" -gt 0 ]; then
+            echo "::error::Found ${#REJS[@]} rejected hunk(s) while applying susfs_patch_to_4.19.patch"
+            mkdir -p "${{ github.workspace }}/rejects"
+            for r in "${REJS[@]}"; do
+              echo "===== $r ====="
+              cat "$r"
+              cp --parents "$r" "${{ github.workspace }}/rejects/"
+              orig="${r%.rej}"
+              [ -f "$orig" ] && cp --parents "$orig" "${{ github.workspace }}/rejects/"
+            done
+            echo "HAS_REJECTS=true" >> "$GITHUB_ENV"
+            exit 1
+          fi
+
+          python3 "${{ github.workspace }}/repo/scripts/apply_sukisu_susfs_hooks.py" "${{ github.workspace }}/device_kernel"
+
+      - name: Upload SuSFS rejects if patch conflicted
+        if: ${{ failure() && env.HAS_REJECTS == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs-rejects
+          path: rejects/
+
+      - name: Apply repo local fixup patches if any
+        run: |
+          if compgen -G "${{ github.workspace }}/repo/patches/*.patch" > /dev/null; then
+            cd "${{ github.workspace }}/device_kernel"
+            for p in "${{ github.workspace }}/repo/patches"/*.patch; do
+              echo "[+] Applying $p"
+              patch -p1 --no-backup-if-mismatch < "$p"
+            done
+          fi
+
+      - name: Configure kernel (kona-perf + debugfs + SukiSU)
+        run: |
+          export PATH="${{ github.workspace }}/clang/bin:${{ github.workspace }}/gcc64/bin:${{ github.workspace }}/gcc32/bin:$PATH"
+          cd "${{ github.workspace }}/device_kernel"
+
+          DEF=arch/arm64/configs/vendor/kona-perf_defconfig
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_FEATURE_ADBROOT=y"
+            echo "CONFIG_KALLSYMS=y"
+            echo "CONFIG_KALLSYMS_ALL=y"
+            echo "CONFIG_OVERLAY_FS=y"
+            echo 'CONFIG_LOCALVERSION="${{ inputs.localversion }}"'
+          } >> "$DEF"
+
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> "$DEF"
+          fi
+
+          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+            {
+              echo "CONFIG_THREAD_INFO_IN_TASK=y"
+              echo "CONFIG_KSU_SUSFS=y"
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+              echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+              echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y"
+            } >> "$DEF"
+          else
+            echo "CONFIG_KSU_SUSFS=n" >> "$DEF"
+          fi
+
+          make O=out ARCH=arm64 vendor/kona-perf_defconfig
+          ./scripts/kconfig/merge_config.sh -O out -m out/.config arch/arm64/configs/vendor/debugfs.config
+          make O=out ARCH=arm64 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            BRAND_SHOW_FLAG=oneplus \
+            LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            olddefconfig
+
+          echo "=== Key resulting Kconfig options ==="
+          grep -E '^(CONFIG_KSU|CONFIG_KPM|CONFIG_KALLSYMS|CONFIG_QCA_CLD_WLAN|CONFIG_LOCALVERSION|CONFIG_THREAD_INFO_IN_TASK|CONFIG_OVERLAY_FS)' out/.config
+
+      - name: Compile kernel Image
+        run: |
+          export PATH="${{ github.workspace }}/clang/bin:${{ github.workspace }}/gcc64/bin:${{ github.workspace }}/gcc32/bin:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_MAXSIZE=2G
+          cd "${{ github.workspace }}/device_kernel"
+
+          set -o pipefail
+          make -j"$(nproc --all)" \
+            CC="ccache clang" \
+            O=out ARCH=arm64 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            BRAND_SHOW_FLAG=oneplus \
+            LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            Image 2>&1 | tee "${{ github.workspace }}/build.log"
+
+      - name: Upload build diagnostics on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-logs
+          if-no-files-found: ignore
+          path: |
+            build.log
+            device_kernel/out/.config
+
+      - name: Apply SukiSU KPM patch_linux to Image
+        if: ${{ inputs.enable_kpm }}
+        run: |
+          cd "${{ github.workspace }}/device_kernel/out/arch/arm64/boot"
+          curl -sSL "${{ env.KPM_PATCH_URL }}" -o patch_linux
+          chmod +x patch_linux
+          ./patch_linux
+          test -f oImage
+          mv -f oImage Image
+          rm -f patch_linux
+          ls -lh Image
+
+      - name: Package AnyKernel3 flashable zip
+        run: |
+          git clone "${{ env.AK3_REPO }}" --depth=1 "${{ github.workspace }}/ak3"
+          cd "${{ github.workspace }}/ak3"
+          rm -rf ramdisk/* patch/* modules/* .git
+          cp "${{ github.workspace }}/repo/anykernel/anykernel.sh" ./anykernel.sh
+          cp "${{ github.workspace }}/device_kernel/out/arch/arm64/boot/Image" ./Image
+
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          OUT_NAME="AnyKernel3-OnePlus8T-kebab-crDroid11-SukiSU-${STAMP}-${{ env.KERNEL_HEAD }}.zip"
+          zip -r9 "${{ github.workspace }}/${OUT_NAME}" ./*
+          echo "AK3_ZIP=${{ github.workspace }}/${OUT_NAME}" >> "$GITHUB_ENV"
+          ls -lh "${{ github.workspace }}/${OUT_NAME}"
+
+      - name: Upload AnyKernel3 zip and raw Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnePlus8T-crDroid11-SukiSU-Kernel
+          path: |
+            ${{ env.AK3_ZIP }}
+            device_kernel/out/arch/arm64/boot/Image
+            device_kernel/out/.config
