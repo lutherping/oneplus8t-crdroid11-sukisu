@@ -73,8 +73,8 @@ def patch_kernelsu_419(root: pathlib.Path) -> None:
     # 4. Suppress -Wunused-variable for 5.10+-only pol/old_pol in selinux/rules.c
     rules = root / "KernelSU" / "kernel" / "selinux" / "rules.c"
     rules_txt = rules.read_text(encoding="utf-8", errors="replace")
-    rules_old = "    struct selinux_policy *pol, *old_pol;\n"
-    rules_new = "    struct selinux_policy __maybe_unused *pol, __maybe_unused *old_pol;\n"
+    rules_old = "void apply_kernelsu_rules(void)\n{\n    struct selinux_policy *pol, *old_pol;\n"
+    rules_new = "void apply_kernelsu_rules(void)\n{\n    struct selinux_policy __maybe_unused *pol, __maybe_unused *old_pol;\n"
     if rules_old in rules_txt:
         rules.write_text(replace_once(rules_txt, rules_old, rules_new, "KernelSU selinux/rules.c unused var"), encoding="utf-8")
         print("[+] KernelSU/kernel/selinux/rules.c: marked pol/old_pol __maybe_unused")
