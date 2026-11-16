@@ -9,10 +9,10 @@ on:
         type: boolean
         default: true
       enable_kpm:
-        description: 'Enable SukiSU KPM (KernelPatch Module) inline patcher'
+        description: 'Enable SukiSU KPM (KernelPatch Module) inline patcher (warning: breaks 4.19 boot on patch_linux)'
         required: true
         type: boolean
-        default: true
+        default: false
       localversion:
         description: 'Kernel CONFIG_LOCALVERSION'
         required: true
@@ -192,7 +192,7 @@ jobs:
 
           # Fast-verify SukiSU + SuSFS + hooked units before full tree compile
           make "${MAKE_ARGS[@]}" prepare 2>&1 | tee "${{ github.workspace }}/build.log"
-          make "${MAKE_ARGS[@]}" init/ security/selinux/ fs/susfs.o fs/exec.o fs/open.o fs/stat.o fs/read_write.o fs/namei.o fs/namespace.o kernel/sys.o 2>&1 | tee -a "${{ github.workspace }}/build.log"
+          make "${MAKE_ARGS[@]}" init/ security/selinux/ fs/susfs.o fs/exec.o fs/open.o fs/stat.o fs/read_write.o fs/namei.o fs/namespace.o kernel/reboot.o kernel/sys.o 2>&1 | tee -a "${{ github.workspace }}/build.log"
           make "${MAKE_ARGS[@]}" drivers/kernelsu/ 2>&1 | tee -a "${{ github.workspace }}/build.log"
           make "${MAKE_ARGS[@]}" Image 2>&1 | tee -a "${{ github.workspace }}/build.log"
 
@@ -218,6 +218,22 @@ jobs:
           mv -f oImage Image
           rm -f patch_linux
           ls -lh Image
+
+      - name: Verify ARM64 Image header and entry jump
+        run: |
+          python3 - <<'PY'
+          import struct
+          img = open("${{ github.workspace }}/device_kernel/out/arch/arm64/boot/Image", "rb").read()
+          c0, c1, text_off, img_sz, flags, r2, r3, r4, magic, pe = struct.unpack("<IIQQQQQQII", img[:64])
+          assert magic == 0x644d5241, f"Bad ARM64 Image magic: {magic:#x}"
+          assert (c0 >> 26) == 0x05, f"Expected B imm26 at code0, got {c0:#x}"
+          imm26 = c0 & 0x3ffffff
+          if imm26 & (1 << 25):
+              imm26 -= (1 << 26)
+          target = imm26 * 4
+          print(f"[+] Image file_len={len(img):#x}, img_sz={img_sz:#x}, code0 target=+{target:#x}")
+          assert 0 < target < len(img), f"FATAL: code0 jump +{target:#x} exceeds Image file_len {len(img):#x}!"
+          PY
 
       - name: Package AnyKernel3 flashable zip
         run: |

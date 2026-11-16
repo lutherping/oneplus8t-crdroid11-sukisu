@@ -171,7 +171,7 @@ def patch_exec(root: pathlib.Path) -> None:
         "#ifdef CONFIG_KSU_SUSFS\n"
         "\tif (likely(susfs_is_current_proc_no_su()))\n"
         "\t\tgoto orig_flow;\n"
-        "\tif (likely(ksu_su_compat_enabled)) {\n"
+        "\tif (likely(ksu_su_compat_enabled) && likely(filename)) {\n"
         "\t\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted))\n"
         "\t\t\tis_su_session = !ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
         "\t\telse\n"
@@ -184,18 +184,18 @@ def patch_exec(root: pathlib.Path) -> None:
 
     txt = replace_once(
         txt,
-        "out_unmark:\n"
-        "\tcurrent->fs->in_exec = 0;\n"
-        "\tcurrent->in_execve = 0;\n\n"
-        "out_free:\n",
-        "out_unmark:\n"
-        "\tcurrent->fs->in_exec = 0;\n"
-        "\tcurrent->in_execve = 0;\n\n"
+        "\tfree_bprm(bprm);\n"
+        "\tkfree(pathbuf);\n"
+        "\tif (filename)\n"
+        "\t\tputname(filename);\n",
+        "\tfree_bprm(bprm);\n"
+        "\tkfree(pathbuf);\n"
         "#ifdef CONFIG_KSU_SUSFS\n"
         "\tif (unlikely(is_su_session))\n"
         "\t\t(void)ksu_handle_post_execveat_sucompat(&fd, &filename, &argv, &envp, &flags, &retval);\n"
-        "#endif\n\n"
-        "out_free:\n",
+        "#endif\n"
+        "\tif (filename)\n"
+        "\t\tputname(filename);\n",
         "fs/exec.c __do_execve_file post-hook",
     )
 
@@ -295,13 +295,13 @@ def patch_read_write(root: pathlib.Path) -> None:
         "}\n",
         "#ifdef CONFIG_KSU\n"
         "extern struct static_key_true ksu_is_init_rc_hook_enabled;\n"
-        "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd);\n"
+        "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n"
         "#endif\n"
         "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)\n"
         "{\n"
         "#ifdef CONFIG_KSU\n"
         "\tif (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))\n"
-        "\t\tksu_handle_sys_read(fd);\n"
+        "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
         "#endif\n"
         "\treturn ksys_read(fd, buf, count);\n"
         "}\n",
@@ -425,6 +425,43 @@ def patch_sys(root: pathlib.Path) -> None:
     print("[+] kernel/sys.c: hooked cleanly")
 
 
+def patch_reboot(root: pathlib.Path) -> None:
+    p = root / "kernel" / "reboot.c"
+    txt = p.read_text(encoding="utf-8", errors="replace")
+    if "ksu_handle_sys_reboot" in txt:
+        print("[=] kernel/reboot.c: already hooked")
+        return
+
+    txt = replace_once(
+        txt,
+        "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n"
+        "\t\tvoid __user *, arg)\n"
+        "{\n"
+        "\tstruct pid_namespace *pid_ns = task_active_pid_ns(current);\n"
+        "\tchar buffer[256];\n"
+        "\tint ret = 0;\n\n"
+        "\t/* We only trust the superuser with rebooting the system. */\n",
+        "#ifdef CONFIG_KSU\n"
+        "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
+        "#endif\n"
+        "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n"
+        "\t\tvoid __user *, arg)\n"
+        "{\n"
+        "\tstruct pid_namespace *pid_ns = task_active_pid_ns(current);\n"
+        "\tchar buffer[256];\n"
+        "\tint ret = 0;\n\n"
+        "#ifdef CONFIG_KSU\n"
+        "\tif (system_state == SYSTEM_RUNNING)\n"
+        "\t\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+        "#endif\n\n"
+        "\t/* We only trust the superuser with rebooting the system. */\n",
+        "kernel/reboot.c reboot syscall",
+    )
+
+    p.write_text(txt, encoding="utf-8")
+    print("[+] kernel/reboot.c: hooked cleanly")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {sys.argv[0]} <kernel_root>")
@@ -436,6 +473,7 @@ def main() -> None:
     patch_open(root)
     patch_read_write(root)
     patch_stat(root)
+    patch_reboot(root)
     patch_sys(root)
     print("[+] All SukiSU-Ultra + SuSFS inline hooks applied cleanly.")
 
