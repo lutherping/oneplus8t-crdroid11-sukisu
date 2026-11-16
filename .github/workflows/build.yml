@@ -179,15 +179,21 @@ jobs:
           cd "${{ github.workspace }}/device_kernel"
 
           set -o pipefail
-          make -j"$(nproc --all)" \
-            CC="ccache clang" \
-            O=out ARCH=arm64 \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            BRAND_SHOW_FLAG=oneplus \
-            LD=ld.lld LLVM=1 LLVM_IAS=1 \
-            Image 2>&1 | tee "${{ github.workspace }}/build.log"
+          MAKE_ARGS=(
+            -j"$(nproc --all)"
+            CC="ccache clang"
+            O=out ARCH=arm64
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-android-
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+            BRAND_SHOW_FLAG=oneplus
+            LD=ld.lld LLVM=1 LLVM_IAS=1
+          )
+
+          # Fast-verify SukiSU + SuSFS + hooked units before full tree compile
+          make "${MAKE_ARGS[@]}" prepare 2>&1 | tee "${{ github.workspace }}/build.log"
+          make "${MAKE_ARGS[@]}" drivers/kernelsu/ fs/susfs.o fs/exec.o fs/open.o fs/stat.o fs/read_write.o fs/namei.o fs/namespace.o kernel/sys.o 2>&1 | tee -a "${{ github.workspace }}/build.log"
+          make "${MAKE_ARGS[@]}" Image 2>&1 | tee -a "${{ github.workspace }}/build.log"
 
       - name: Upload build diagnostics on failure
         if: ${{ failure() }}

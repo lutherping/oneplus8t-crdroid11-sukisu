@@ -29,6 +29,26 @@ def patch_namei(root: pathlib.Path) -> None:
         raise RuntimeError("[fs/namei.c] could not locate filename_lookup definition")
 
 
+def patch_kernelsu_419(root: pathlib.Path) -> None:
+    p = root / "KernelSU" / "kernel" / "kernel_includes.h"
+    txt = p.read_text(encoding="utf-8", errors="replace")
+    target = "#include <linux/static_call.h>\n"
+    guarded = (
+        "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n"
+        "#include <linux/static_call.h>\n"
+        "#endif\n"
+    )
+    if guarded in txt:
+        print("[=] KernelSU/kernel/kernel_includes.h: static_call.h already guarded")
+        return
+    if target in txt:
+        txt = replace_once(txt, target, guarded, "KernelSU kernel_includes.h static_call guard")
+        p.write_text(txt, encoding="utf-8")
+        print("[+] KernelSU/kernel/kernel_includes.h: guarded <linux/static_call.h> for < 5.10")
+    else:
+        print("[=] KernelSU/kernel/kernel_includes.h: static_call.h not present")
+
+
 def patch_namespace(root: pathlib.Path) -> None:
     p = root / "fs" / "namespace.c"
     rej = root / "fs" / "namespace.c.rej"
@@ -378,6 +398,7 @@ def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {sys.argv[0]} <kernel_root>")
     root = pathlib.Path(sys.argv[1]).resolve()
+    patch_kernelsu_419(root)
     patch_namespace(root)
     patch_namei(root)
     patch_exec(root)
