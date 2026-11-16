@@ -192,7 +192,8 @@ jobs:
 
           # Fast-verify SukiSU + SuSFS + hooked units before full tree compile
           make "${MAKE_ARGS[@]}" prepare 2>&1 | tee "${{ github.workspace }}/build.log"
-          make "${MAKE_ARGS[@]}" drivers/kernelsu/ fs/susfs.o fs/exec.o fs/open.o fs/stat.o fs/read_write.o fs/namei.o fs/namespace.o kernel/sys.o 2>&1 | tee -a "${{ github.workspace }}/build.log"
+          make "${MAKE_ARGS[@]}" init/ fs/susfs.o fs/exec.o fs/open.o fs/stat.o fs/read_write.o fs/namei.o fs/namespace.o kernel/sys.o 2>&1 | tee -a "${{ github.workspace }}/build.log"
+          make "${MAKE_ARGS[@]}" drivers/kernelsu/ 2>&1 | tee -a "${{ github.workspace }}/build.log"
           make "${MAKE_ARGS[@]}" Image 2>&1 | tee -a "${{ github.workspace }}/build.log"
 
       - name: Upload build diagnostics on failure
@@ -200,6 +201,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-failure-logs
+          include-hidden-files: true
           if-no-files-found: ignore
           path: |
             build.log
