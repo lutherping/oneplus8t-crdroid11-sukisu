@@ -29,6 +29,46 @@ def patch_namei(root: pathlib.Path) -> None:
         raise RuntimeError("[fs/namei.c] could not locate filename_lookup definition")
 
 
+def patch_namespace(root: pathlib.Path) -> None:
+    p = root / "fs" / "namespace.c"
+    rej = root / "fs" / "namespace.c.rej"
+    orig = root / "fs" / "namespace.c.orig"
+    txt = p.read_text(encoding="utf-8", errors="replace")
+
+    if "#define CL_COPY_MNT_NS" not in txt:
+        txt = replace_once(
+            txt,
+            "#include <linux/sched/task.h>\n\n"
+            "#include \"pnode.h\"\n"
+            "#include \"internal.h\"\n",
+            "#include <linux/sched/task.h>\n"
+            "#ifdef CONFIG_KSU_SUSFS\n"
+            "#include <linux/susfs_def.h>\n"
+            "#endif // #ifdef CONFIG_KSU_SUSFS\n\n"
+            "#include \"pnode.h\"\n"
+            "#include \"internal.h\"\n\n"
+            "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+            "extern bool susfs_is_current_ksu_domain(void);\n"
+            "extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n\n"
+            "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n\n"
+            "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n",
+            "fs/namespace.c OPLUS_SECURE_GUARD header conflict fix",
+        )
+        p.write_text(txt, encoding="utf-8")
+        print("[+] fs/namespace.c: resolved header hunk cleanly")
+
+    if rej.exists():
+        rej_txt = rej.read_text(encoding="utf-8", errors="replace")
+        # Only remove .rej if it exclusively contains the single header hunk we just applied
+        if rej_txt.count("@@") == 2 and "CL_COPY_MNT_NS BIT(25)" in rej_txt:
+            rej.unlink()
+            if orig.exists():
+                orig.unlink()
+            print("[+] fs/namespace.c.rej: cleared resolved header reject")
+        else:
+            print("[!] fs/namespace.c.rej contains unexpected hunks; leaving .rej intact")
+
+
 def patch_exec(root: pathlib.Path) -> None:
     p = root / "fs" / "exec.c"
     txt = p.read_text(encoding="utf-8", errors="replace")
@@ -338,6 +378,7 @@ def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(f"Usage: {sys.argv[0]} <kernel_root>")
     root = pathlib.Path(sys.argv[1]).resolve()
+    patch_namespace(root)
     patch_namei(root)
     patch_exec(root)
     patch_open(root)

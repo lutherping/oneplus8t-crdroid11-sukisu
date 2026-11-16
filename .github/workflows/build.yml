@@ -86,6 +86,8 @@ jobs:
           cp "${{ github.workspace }}/nongki_ref/Patches/Patch/susfs_patch_to_4.19.patch" ./susfs.patch
           patch -p1 --no-backup-if-mismatch < susfs.patch || true
 
+          python3 "${{ github.workspace }}/repo/scripts/apply_sukisu_susfs_hooks.py" "${{ github.workspace }}/device_kernel"
+
           mapfile -t REJS < <(find . -type f -name '*.rej' | sort)
           if [ "${#REJS[@]}" -gt 0 ]; then
             echo "::error::Found ${#REJS[@]} rejected hunk(s) while applying susfs_patch_to_4.19.patch"
@@ -100,8 +102,6 @@ jobs:
             echo "HAS_REJECTS=true" >> "$GITHUB_ENV"
             exit 1
           fi
-
-          python3 "${{ github.workspace }}/repo/scripts/apply_sukisu_susfs_hooks.py" "${{ github.workspace }}/device_kernel"
 
       - name: Upload SuSFS rejects if patch conflicted
         if: ${{ failure() && env.HAS_REJECTS == 'true' }}
